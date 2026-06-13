@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from datetime import datetime, timedelta
 
 import models, schemas, database, auth
@@ -86,16 +87,13 @@ def find_polymarket_event(home_code: str, away_code: str, base_date_str: str):
 
 def fetch_polymarket_events(db: Session):
     today_utc = datetime.utcnow().date()
-    oldest = db.query(models.Market).order_by(models.Market.created_at.asc()).first()
-    if oldest and oldest.created_at.date() >= today_utc:
+    # Use the most recently created market to decide if we already refreshed today.
+    newest = db.query(models.Market).order_by(models.Market.created_at.desc()).first()
+    if newest and newest.created_at.date() >= today_utc:
         # Data was already fetched today — skip
         return
-    # Data is stale (from a previous day) or DB is empty — clear and re-fetch
-    if oldest:
-        print(f"Market data is from {oldest.created_at.date()}, today is {today_utc}. Re-fetching...")
-        db.query(models.VoteRecord).delete()
-        db.query(models.Market).delete()
-        db.commit()
+    if newest:
+        print(f"Latest market data is from {newest.created_at.date()}, today is {today_utc}. Refreshing odds and adding new matches (votes & accounts are preserved)...")
 
     print("Fetching real Polymarket events using World Cup 2026 schedule...")
     try:
@@ -272,23 +270,61 @@ def fetch_polymarket_events(db: Session):
             time.sleep(0.5)
                 
         if markets_to_add:
-            db.add_all(markets_to_add)
+            # Upsert by market_id so existing markets keep their id (and thus
+            # their votes / vote records) — we only refresh odds and titles,
+            # and insert markets we haven't seen before.
+            existing = {m.market_id: m for m in db.query(models.Market).all()}
+            for nm in markets_to_add:
+                current = existing.get(nm.market_id)
+                if current:
+                    current.odds = nm.odds
+                    current.event_title = nm.event_title
+                    current.option_name = nm.option_name
+                    current.home_team_code = nm.home_team_code
+                    current.created_at = datetime.utcnow()
+                else:
+                    db.add(nm)
+                    existing[nm.market_id] = nm
             db.commit()
     except Exception as e:
         print(f"Error generating events: {e}")
 
+STARTUP_LOCK_KEY = 987654321
+
+
 @app.on_event("startup")
 def startup_event():
     db = database.SessionLocal()
-    fetch_polymarket_events(db)
-    
-    # Initialize SharedFund if it doesn't exist
-    if db.query(models.SharedFund).count() == 0:
-        fund = models.SharedFund(balance=1000.0)
-        db.add(fund)
-        db.commit()
-        
-    db.close()
+    is_postgres = database.engine.dialect.name == "postgresql"
+    lock_acquired = True
+    try:
+        # On autoscale there can be several instances. Use a Postgres advisory
+        # lock so only ONE instance runs the market refresh / fund init at a
+        # time — this prevents duplicate markets and split votes.
+        if is_postgres:
+            lock_acquired = bool(
+                db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": STARTUP_LOCK_KEY}).scalar()
+            )
+
+        if not lock_acquired:
+            print("Another instance is refreshing markets; skipping on this instance.")
+            return
+
+        fetch_polymarket_events(db)
+
+        # Initialize SharedFund if it doesn't exist
+        if db.query(models.SharedFund).count() == 0:
+            fund = models.SharedFund(balance=1000.0)
+            db.add(fund)
+            db.commit()
+    finally:
+        if is_postgres and lock_acquired:
+            try:
+                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": STARTUP_LOCK_KEY})
+                db.commit()
+            except Exception as e:
+                print(f"Error releasing startup lock: {e}")
+        db.close()
 
 # Auth Endpoints
 @app.post("/api/auth/register", response_model=schemas.UserResponse)

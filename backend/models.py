@@ -16,7 +16,7 @@ class Market(Base):
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(String, index=True)
     event_title = Column(String)
-    market_id = Column(String, index=True) # ID from polymarket
+    market_id = Column(String, index=True, unique=True) # ID from polymarket
     market_type = Column(String, default="Moneyline")
     option_name = Column(String) # e.g., "Brazil"
     home_team_code = Column(String, default="")  # FIFA code of the home team, e.g. "USA"

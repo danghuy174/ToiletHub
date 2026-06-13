@@ -1,1 +1,2 @@
 - [Polymarket slug codes](polymarket-slug-codes.md) — fifwc slugs use mixed FIFA/ISO team codes (SUI→che) and UTC date can be ±1 day; try variants, don't trust one slug.
+- [Autoscale + SQLite data loss](persistence-autoscale-db.md) — autoscale wipes local SQLite; users/votes MUST use Postgres (DATABASE_URL); refresh upserts (never deletes) under advisory lock.
