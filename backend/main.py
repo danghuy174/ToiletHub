@@ -54,7 +54,7 @@ def fetch_polymarket_events(db: Session):
             matches = json.load(f)
             
         markets_to_add = []
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        now_utc = datetime.utcnow()
         count = 0
         for match in matches:
             if count >= 15:
@@ -63,14 +63,24 @@ def fetch_polymarket_events(db: Session):
             away_code = teams_dict.get(match["away_team_id"])
             if not home_code or not away_code:
                 continue
-                
-            date_parts = match['local_date'].split(' ')[0].split('/')
-            date_str = f"{date_parts[2]}-{date_parts[0]}-{date_parts[1]}"
-            if date_str < today:
-                continue
-            
+
+            # local_date is in US local time (UTC-4 to UTC-7).
+            # Add 7h (Pacific offset) to convert to UTC conservatively —
+            # this avoids filtering out late-evening US matches that haven't
+            # started yet but whose date is already "yesterday" in UTC.
+            try:
+                match_local_dt = datetime.strptime(match['local_date'], "%m/%d/%Y %H:%M")
+                match_utc_dt = match_local_dt + timedelta(hours=7)
+                if match_utc_dt < now_utc:
+                    continue
+            except Exception:
+                date_parts = match['local_date'].split(' ')[0].split('/')
+                date_str = f"{date_parts[2]}-{date_parts[0]}-{date_parts[1]}"
+                if date_str < now_utc.strftime("%Y-%m-%d"):
+                    continue
+
             count += 1
-                
+
             date_parts = match['local_date'].split(' ')[0].split('/')
             date_str = f"{date_parts[2]}-{date_parts[0]}-{date_parts[1]}"
             slug = f"fifwc-{home_code}-{away_code}-{date_str}"
