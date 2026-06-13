@@ -34,6 +34,56 @@ import random
 
 import time
 
+# Polymarket sometimes uses ISO 3166-1 alpha-3 codes instead of FIFA codes.
+# We try the FIFA code first, then this ISO alternate as a fallback.
+FIFA_TO_ISO = {
+    "sui": "che", "ned": "nld", "ger": "deu", "por": "prt", "den": "dnk",
+    "cro": "hrv", "uru": "ury", "rsa": "zaf", "chi": "chl", "alg": "dza",
+    "par": "pry", "hai": "hti", "gre": "grc", "uae": "are", "ksa": "sau",
+    "tah": "pyf", "bul": "bgr", "vie": "vnm", "tpe": "twn", "phi": "phl",
+    "eqg": "gnq", "cgo": "cog", "ang": "ago", "mri": "mus", "mtn": "mrt",
+    "sud": "sdn", "tan": "tza", "mad": "mdg", "nig": "ner", "gam": "gmb",
+    "gui": "gin", "bot": "bwa", "zim": "zwe", "zam": "zmb", "sey": "syc",
+}
+
+
+def find_polymarket_event(home_code: str, away_code: str, base_date_str: str):
+    """Try several slug variants (FIFA/ISO codes, date +/- 1 day) and return
+    the first (event, slug) that Polymarket returns, or (None, None)."""
+    home_codes = [home_code]
+    if FIFA_TO_ISO.get(home_code) and FIFA_TO_ISO[home_code] not in home_codes:
+        home_codes.append(FIFA_TO_ISO[home_code])
+    away_codes = [away_code]
+    if FIFA_TO_ISO.get(away_code) and FIFA_TO_ISO[away_code] not in away_codes:
+        away_codes.append(FIFA_TO_ISO[away_code])
+
+    try:
+        base_dt = datetime.strptime(base_date_str, "%Y-%m-%d")
+        date_candidates = [
+            base_date_str,
+            (base_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+            (base_dt - timedelta(days=1)).strftime("%Y-%m-%d"),
+        ]
+    except Exception:
+        date_candidates = [base_date_str]
+
+    for h in home_codes:
+        for a in away_codes:
+            for d in date_candidates:
+                slug = f"fifwc-{h}-{a}-{d}"
+                try:
+                    resp = requests.get(
+                        f"https://gamma-api.polymarket.com/events?slug={slug}",
+                        timeout=5,
+                    )
+                except Exception as e:
+                    print(f"Request error for {slug}: {e}")
+                    continue
+                if resp.status_code == 200 and resp.json():
+                    return resp.json()[0], slug
+    return None, None
+
+
 def fetch_polymarket_events(db: Session):
     today_utc = datetime.utcnow().date()
     oldest = db.query(models.Market).order_by(models.Market.created_at.asc()).first()
@@ -90,23 +140,14 @@ def fetch_polymarket_events(db: Session):
                 if date_str < now_utc.strftime("%Y-%m-%d"):
                     continue
 
-            count += 1
-
             date_parts = match['local_date'].split(' ')[0].split('/')
             date_str = f"{date_parts[2]}-{date_parts[0]}-{date_parts[1]}"
-            slug = f"fifwc-{home_code}-{away_code}-{date_str}"
-            
-            url = f"https://gamma-api.polymarket.com/events?slug={slug}"
-            try:
-                response = requests.get(url, timeout=5)
-            except Exception as e:
-                print(f"Request timeout for {slug}: {e}")
-                continue
-            if response.status_code == 200:
-                events = response.json()
-                if not events:
-                    continue
-                event = events[0]
+
+            event, slug = find_polymarket_event(home_code, away_code, date_str)
+            if event:
+                # Only count fixtures that actually have a Polymarket market,
+                # so matches without markets don't consume the 15-match budget.
+                count += 1
                 event_id = event.get("id", slug)
                 event_title = event.get("title", f"{home_code.upper()} vs {away_code.upper()}")
                 

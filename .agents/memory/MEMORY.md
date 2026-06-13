@@ -1,0 +1,1 @@
+- [Polymarket slug codes](polymarket-slug-codes.md) — fifwc slugs use mixed FIFA/ISO team codes (SUI→che) and UTC date can be ±1 day; try variants, don't trust one slug.
