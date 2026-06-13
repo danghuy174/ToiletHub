@@ -68,20 +68,28 @@ def find_polymarket_event(home_code: str, away_code: str, base_date_str: str):
     except Exception:
         date_candidates = [base_date_str]
 
+    slugs = []
     for h in home_codes:
         for a in away_codes:
             for d in date_candidates:
-                slug = f"fifwc-{h}-{a}-{d}"
-                try:
-                    resp = requests.get(
-                        f"https://gamma-api.polymarket.com/events?slug={slug}",
-                        timeout=5,
-                    )
-                except Exception as e:
-                    print(f"Request error for {slug}: {e}")
-                    continue
-                if resp.status_code == 200 and resp.json():
-                    return resp.json()[0], slug
+                slugs.append(f"fifwc-{h}-{a}-{d}")
+
+    import concurrent.futures
+
+    def fetch_slug(slug):
+        try:
+            resp = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=5)
+            if resp.status_code == 200 and resp.json():
+                return resp.json()[0], slug
+        except Exception as e:
+            pass
+        return None, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        for event, slug in executor.map(fetch_slug, slugs):
+            if event:
+                return event, slug
+
     return None, None
 
 
@@ -294,37 +302,41 @@ STARTUP_LOCK_KEY = 987654321
 
 @app.on_event("startup")
 def startup_event():
-    db = database.SessionLocal()
-    is_postgres = database.engine.dialect.name == "postgresql"
-    lock_acquired = True
-    try:
-        # On autoscale there can be several instances. Use a Postgres advisory
-        # lock so only ONE instance runs the market refresh / fund init at a
-        # time — this prevents duplicate markets and split votes.
-        if is_postgres:
-            lock_acquired = bool(
-                db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": STARTUP_LOCK_KEY}).scalar()
-            )
+    import threading
+    def background_startup():
+        db = database.SessionLocal()
+        is_postgres = database.engine.dialect.name == "postgresql"
+        lock_acquired = True
+        try:
+            # On autoscale there can be several instances. Use a Postgres advisory
+            # lock so only ONE instance runs the market refresh / fund init at a
+            # time — this prevents duplicate markets and split votes.
+            if is_postgres:
+                lock_acquired = bool(
+                    db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": STARTUP_LOCK_KEY}).scalar()
+                )
 
-        if not lock_acquired:
-            print("Another instance is refreshing markets; skipping on this instance.")
-            return
+            if not lock_acquired:
+                print("Another instance is refreshing markets; skipping on this instance.")
+                return
 
-        fetch_polymarket_events(db)
+            fetch_polymarket_events(db)
 
-        # Initialize SharedFund if it doesn't exist
-        if db.query(models.SharedFund).count() == 0:
-            fund = models.SharedFund(balance=1000.0)
-            db.add(fund)
-            db.commit()
-    finally:
-        if is_postgres and lock_acquired:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": STARTUP_LOCK_KEY})
+            # Initialize SharedFund if it doesn't exist
+            if db.query(models.SharedFund).count() == 0:
+                fund = models.SharedFund(balance=1000.0)
+                db.add(fund)
                 db.commit()
-            except Exception as e:
-                print(f"Error releasing startup lock: {e}")
-        db.close()
+        finally:
+            if is_postgres and lock_acquired:
+                try:
+                    db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": STARTUP_LOCK_KEY})
+                    db.commit()
+                except Exception as e:
+                    print(f"Error releasing startup lock: {e}")
+            db.close()
+            
+    threading.Thread(target=background_startup, daemon=True).start()
 
 # Auth Endpoints
 @app.post("/api/auth/register", response_model=schemas.UserResponse)
