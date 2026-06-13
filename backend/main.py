@@ -35,8 +35,17 @@ import random
 import time
 
 def fetch_polymarket_events(db: Session):
-    if db.query(models.Market).count() > 0:
+    today_utc = datetime.utcnow().date()
+    oldest = db.query(models.Market).order_by(models.Market.created_at.asc()).first()
+    if oldest and oldest.created_at.date() >= today_utc:
+        # Data was already fetched today — skip
         return
+    # Data is stale (from a previous day) or DB is empty — clear and re-fetch
+    if oldest:
+        print(f"Market data is from {oldest.created_at.date()}, today is {today_utc}. Re-fetching...")
+        db.query(models.VoteRecord).delete()
+        db.query(models.Market).delete()
+        db.commit()
 
     print("Fetching real Polymarket events using World Cup 2026 schedule...")
     try:
