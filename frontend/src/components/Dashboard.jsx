@@ -3,7 +3,7 @@ import axios from 'axios';
 import EventCard from './EventCard';
 import { Wallet } from 'lucide-react';
 
-const API_URL = 'http://localhost:8050/api';
+const API_URL = '/api';
 
 export default function Dashboard({ token }) {
   const [events, setEvents] = useState([]);
